@@ -2,10 +2,11 @@ import random, mysql.connector as mc
 
 def db_init():
     return mc.connect(
-    host='localhost',
+    host='shuttle.proxy.rlwy.net',
+    port=22286,
     user='root',
-    password='',
-    database='lyfjs_library')
+    password='VXLTnudZeItLAsYwhJPROhRTmsZCSjCs',
+    database='railway')
 
 
 db = db_init()
