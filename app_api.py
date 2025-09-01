@@ -4,6 +4,8 @@ import os
 from flask_cors import CORS
 from datetime import datetime
 import hashlib
+import uuid
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
@@ -13,7 +15,20 @@ CORS(app, supports_credentials=True, origins=["http://127.0.0.1:5000", "http://l
      allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
+# Configure upload folder
+UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'databasecontent', 'cover')
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def generate_unique_filename(filename):
+    """Generate a unique filename to avoid conflicts"""
+    ext = filename.rsplit('.', 1)[1].lower()
+    unique_id = str(uuid.uuid4())[:8]
+    return f"{unique_id}.{ext}"
+
+# Existing routes...
 
 @app.route('/api/books', methods=['GET'])
 def api_books():
@@ -59,9 +74,6 @@ def api_books():
             'genre': rec.get('genre'),
         })
     return jsonify(items)
-
-
-
 
 @app.route('/api/login', methods=['POST'])
 def api_login():
@@ -151,8 +163,6 @@ def api_register():
         db.close()
         return jsonify({"error": "Registration failed. Please try again."}), 500
 
-
-
 @app.route('/api/logout', methods=['POST'])
 def api_logout():
     session.clear()
@@ -174,22 +184,47 @@ def health_check():
         "version": "1.0.0"
     })
 
+@app.route('/api/debug/admin-users', methods=['GET'])
+def debug_admin_users():
+    """Debug endpoint to check admin users in database"""
+    db = db_init()
+    cursor = db.cursor()
+    
+    try:
+        cursor.execute("SELECT id, username FROM admin")
+        admins = cursor.fetchall()
+        
+        admin_list = []
+        for admin in admins:
+            admin_list.append({
+                "id": admin[0],
+                "username": admin[1]
+            })
+        
+        return jsonify({
+            "admin_count": len(admin_list),
+            "admins": admin_list
+        })
+    finally:
+        cursor.close()
+        db.close()
+
 @app.route('/api/books/<int:book_id>', methods=['GET'])
 def get_book(book_id):
     db = db_init()
     cursor = db.cursor()
     cursor.execute("SELECT * FROM books WHERE id=%s", (book_id,))
     row = cursor.fetchone()
-    cursor.close()
-    db.close()
     
     if not row:
+        cursor.close()
+        db.close()
         return jsonify({"error": "Book not found"}), 404
     
-    cursor = db.cursor()
     cursor.execute("SHOW COLUMNS FROM books")
     cols = [row[0] for row in cursor.fetchall()]
     cursor.close()
+    db.close()
     
     book_data = dict(zip(cols, row))
     return jsonify(book_data)
@@ -246,10 +281,9 @@ def search_books():
     
     return jsonify(books)
 
-# Admin routes - copied from admin_api.py
+# Admin routes
 @app.route('/api/admin/login', methods=['POST'])
 def api_admin_login():
-    
     data = request.get_json() or {}
     username_data = data.get('username')
     password_data = data.get('password')
@@ -277,7 +311,12 @@ def api_admin_login():
             session['username'] = username
             print(f"DEBUG Login: Session set - admin_id={admin_id}, username={username}")
             print(f"DEBUG Login: Full session: {dict(session)}")
-            return jsonify({"success": True, "message": "Login successful"})
+            return jsonify({
+                "success": True, 
+                "message": "Login successful",
+                "admin_id": admin_id,
+                "username": username
+            })
         
         print("DEBUG Login: No matching user found")
         return jsonify({"error": "Invalid credentials"}), 401
@@ -288,16 +327,9 @@ def api_admin_login():
 
 @app.route('/api/admin/profile', methods=['GET'])
 def api_admin_profile():
-    print(f"DEBUG Profile: Session contents: {dict(session)}")
-    print(f"DEBUG Profile: Session keys: {list(session.keys())}")
-    print(f"DEBUG Profile: Admin ID: {session.get('admin_id')}")
-    print(f"DEBUG Profile: Request cookies: {dict(request.cookies)}")
-    
     if not session.get('admin_id'):
-        print("DEBUG Profile: No admin_id in session - returning 401")
         return jsonify({"error": "Unauthorized"}), 401
     
-    print(f"DEBUG Profile: User authenticated: {session['username']}")
     return jsonify({
         "admin_id": session['admin_id'],
         "username": session.get('username')
@@ -309,6 +341,263 @@ def api_admin_logout():
     session.clear()
     print(f"DEBUG Logout: Session after clear: {dict(session)}")
     return jsonify({"success": True, "message": "Logged out successfully"})
+
+# Admin book management endpoints
+@app.route('/api/admin/books', methods=['GET'])
+def api_admin_get_books():
+
+    db = db_init()
+    cursor = db.cursor()
+    
+    try:
+        cursor.execute("""
+            SELECT id, title, bookType, level, strand, qtr, genre, 
+                   description, quantity, publisher, cover
+            FROM books 
+            ORDER BY id DESC
+        """)
+        rows = cursor.fetchall()
+        
+        books = []
+        for row in rows:
+            books.append({
+                'id': row[0],
+                'title': row[1],
+                'bookType': row[2],
+                'level': row[3],
+                'strand': row[4],
+                'qtr': row[5],
+                'genre': row[6],
+                'description': row[7],
+                'quantity': row[8],
+                'publisher': row[9],
+                'cover': row[10]
+            })
+        
+        return jsonify(books)
+    finally:
+        cursor.close()
+        db.close()
+
+@app.route('/api/admin/books', methods=['POST'])
+def api_admin_add_book():
+
+    try:
+        # Get form data
+        title = request.form.get('title')
+        book_type = request.form.get('bookType')
+        description = request.form.get('description')
+        quantity = request.form.get('quantity')
+        publisher = request.form.get('publisher')
+        
+        # Validate required fields
+        if not all([title, book_type, quantity, publisher]):
+            return jsonify({"error": "Missing required fields"}), 400
+        
+        # Handle book type specific fields
+        level = None
+        strand = None
+        qtr = None
+        genre = None
+        
+        if book_type == 'Module':
+            level = request.form.get('level')
+            strand = request.form.get('strand')
+            qtr = request.form.get('qtr')
+            if not all([level, strand, qtr]):
+                return jsonify({"error": "Module requires level, strand, and quarter"}), 400
+        elif book_type == 'Novel':
+            genre = request.form.get('genre')
+            if not genre:
+                return jsonify({"error": "Novel requires genre"}), 400
+        
+        # Handle cover upload
+        cover_filename = None
+        if 'cover' in request.files:
+            cover_file = request.files['cover']
+            if cover_file and cover_file.filename and allowed_file(cover_file.filename):
+                cover_filename = generate_unique_filename(cover_file.filename)
+                cover_file.save(os.path.join(UPLOAD_FOLDER, cover_filename))
+        
+        # Insert into database
+        db = db_init()
+        cursor = db.cursor()
+        
+        cursor.execute("""
+            INSERT INTO books (title, bookType, level, strand, qtr, genre, 
+                              description, quantity, publisher, cover)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (title, book_type, level, strand, qtr, genre, 
+              description, quantity, publisher, cover_filename))
+        
+        db.commit()
+        book_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+        
+        return jsonify({
+            "success": True,
+            "message": "Book added successfully",
+            "book_id": book_id
+        }), 201
+        
+    except Exception as e:
+        print(f"Error adding book: {e}")
+        return jsonify({"error": "Failed to add book"}), 500
+
+@app.route('/api/admin/books/<int:book_id>', methods=['GET'])
+def api_admin_get_book(book_id):
+
+    db = db_init()
+    cursor = db.cursor()
+    
+    try:
+        cursor.execute("""
+            SELECT id, title, bookType, level, strand, qtr, genre, 
+                   description, quantity, publisher, cover
+            FROM books WHERE id = %s
+        """, (book_id,))
+        
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"error": "Book not found"}), 404
+        
+        book = {
+            'id': row[0],
+            'title': row[1],
+            'bookType': row[2],
+            'level': row[3],
+            'strand': row[4],
+            'qtr': row[5],
+            'genre': row[6],
+            'description': row[7],
+            'quantity': row[8],
+            'publisher': row[9],
+            'cover': row[10]
+        }
+        
+        return jsonify(book)
+    finally:
+        cursor.close()
+        db.close()
+
+@app.route('/api/admin/books/<int:book_id>', methods=['PUT'])
+def api_admin_update_book(book_id):
+
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ['title', 'bookType', 'quantity', 'publisher']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+        
+        # Handle book type specific validation
+        if data['bookType'] == 'Module':
+            if not all([data.get('level'), data.get('strand'), data.get('qtr')]):
+                return jsonify({"error": "Module requires level, strand, and quarter"}), 400
+        elif data['bookType'] == 'Novel':
+            if not data.get('genre'):
+                return jsonify({"error": "Novel requires genre"}), 400
+        
+        # Update database
+        db = db_init()
+        cursor = db.cursor()
+        
+        cursor.execute("""
+            UPDATE books 
+            SET title = %s, bookType = %s, level = %s, strand = %s, qtr = %s, 
+                genre = %s, description = %s, quantity = %s, publisher = %s
+            WHERE id = %s
+        """, (
+            data['title'], data['bookType'], data.get('level'), data.get('strand'),
+            data.get('qtr'), data.get('genre'), data.get('description', ''),
+            data['quantity'], data['publisher'], book_id
+        ))
+        
+        # Handle cover update if provided
+        if data.get('cover'):
+            cursor.execute("UPDATE books SET cover = %s WHERE id = %s", 
+                          (data['cover'], book_id))
+        
+        db.commit()
+        cursor.close()
+        db.close()
+        
+        return jsonify({
+            "success": True,
+            "message": "Book updated successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error updating book: {e}")
+        return jsonify({"error": "Failed to update book"}), 500
+
+@app.route('/api/admin/books/<int:book_id>', methods=['DELETE'])
+def api_admin_delete_book(book_id):
+
+    db = db_init()
+    cursor = db.cursor()
+    
+    try:
+        # Get cover filename before deletion
+        cursor.execute("SELECT cover FROM books WHERE id = %s", (book_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            return jsonify({"error": "Book not found"}), 404
+        
+        # Delete cover file if it exists
+        cover_filename = row[0]
+        if cover_filename:
+            cover_path = os.path.join(UPLOAD_FOLDER, cover_filename)
+            if os.path.exists(cover_path):
+                os.remove(cover_path)
+        
+        # Delete from database
+        cursor.execute("DELETE FROM books WHERE id = %s", (book_id,))
+        db.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": "Book deleted successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error deleting book: {e}")
+        return jsonify({"error": "Failed to delete book"}), 500
+    finally:
+        cursor.close()
+        db.close()
+
+@app.route('/api/admin/books/upload-cover', methods=['POST'])
+def api_admin_upload_cover():
+
+    if 'cover' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    
+    cover_file = request.files['cover']
+    if cover_file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+    
+    if not allowed_file(cover_file.filename):
+        return jsonify({"error": "Invalid file type. Allowed: png, jpg, jpeg, gif"}), 400
+    
+    try:
+        filename = generate_unique_filename(cover_file.filename)
+        cover_file.save(os.path.join(UPLOAD_FOLDER, filename))
+        
+        return jsonify({
+            "success": True,
+            "filename": filename,
+            "message": "Cover uploaded successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error uploading cover: {e}")
+        return jsonify({"error": "Failed to upload cover"}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
