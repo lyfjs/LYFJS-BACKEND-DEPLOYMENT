@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 app.secret_key = 'fk9lratv113023'
 
-CORS(app, supports_credentials=True, origins=["http://127.0.0.1:5000", "http://localhost:5000", "http://127.0.0.1:5500", "http://127.0.0.1:5501", "http://localhost:5501"], 
+CORS(app, supports_credentials=True, origins="*", 
      allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
@@ -603,4 +603,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_ENV') == 'development'
     
+
     app.run(host='0.0.0.0', port=port, debug=debug)
